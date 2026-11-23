@@ -1521,6 +1521,26 @@ if (typeof window !== 'undefined') window.TEV = TEV;
       R.lastSec = s;
       const T = S.parser.T;
       const fmt1 = (v) => (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1);
+
+      /* MARQUAGE AUTOMATIQUE DU FREINAGE — on ne demande pas à l'utilisateur de viser une minute
+         ronde. Si la vitesse chute d'un seuil en une seconde, c'est un freinage : on écrit une
+         ligne # FREIN avec l'avant/l'après. Si le compteur de régénération augmente, on écrit # REGEN.
+         Ces marqueurs me permettent de localiser l'instant exact du freinage dans le fichier,
+         sans que l'utilisateur ait à synchroniser quoi que ce soit. */
+      if (T.have72 && R.prevSpeed !== null) {
+        const drop = R.prevSpeed - T.speed;
+        if (drop >= 5 && R.prevSpeed >= 5) {
+          R.lines.push('# FREIN ' + fmt1(R.prevSpeed) + '→' + fmt1(T.speed) + ' km/h');
+          R.lastPushAt = Date.now();
+        }
+      }
+      if (T.have73 && R.prevRegen !== null && T.energyFb > R.prevRegen) {
+        R.lines.push('# REGEN +' + (T.energyFb - R.prevRegen).toFixed(1) + ' Wh → ' + T.energyFb.toFixed(1));
+        R.lastPushAt = Date.now();
+      }
+      if (T.have72) R.prevSpeed = T.speed;
+      if (T.have73) R.prevRegen = T.energyFb;
+
       // Une ligne par seconde, en clair : c'est ce qui rend le fichier lisible à l'œil,
       // et ce qui permet de recouper à la seconde près avec ce que montre l'app officielle.
       recPush('ETAT t=' + s + 's'
@@ -1541,6 +1561,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     const R = S.rec;
     R.on = true; R.t0 = Date.now(); R.ms = 0; R.lines = []; R.count = 0; R.size = 0; R.lastSec = -1;
     R.gaps = 0; R.lastPushAt = Date.now(); R.savedAt = 0; R.endedAt = 0;
+    R.prevSpeed = null; R.prevRegen = null;
     R.lines.push('# Fighter Q · cockpit BLE · ' + BUILD + ' · début ' + new Date().toISOString());
     R.lines.push('# format: horodatage<TAB>source<TAB>octets');
     R.timer = setInterval(recTick, 500);
@@ -2027,17 +2048,21 @@ if (typeof window !== 'undefined') window.TEV = TEV;
   }
 
   /* E-ABS — deux champs distincts dans 55 71, et ils ne disent pas la même chose :
-       • le RÉGLAGE est le quartet haut de t[9]  → 0x55 donne 5 (sur 15)
+       • le RÉGLAGE est le quartet haut de t[9]  → 0x55 donne 5
        • l'INDICATEUR est le bit 3 de t[4]       → 0
      Afficher l'un à la place de l'autre était mon erreur (l'onglet annonçait « eABS inactif »
-     alors que le réglage est à 5). On montre les deux, sans conclure à la place de la machine. */
+     alors que le réglage est à 5). On montre les deux, sans conclure à la place de la machine.
+     Échelle : le code de référence applique un masque 0x0F (0..15), mais la machine affiche
+     l'échelle 0..5 — t[9]=0x55 se lit 5/5. Le /15 était ma déduction, pas une mesure : on affiche
+     le /5 que la machine elle-même montre. */
   function eabsRow(T) {
     const g = T.gearCache[T.gear] || {};
     const lvl = (g.eabsLevel === undefined || g.eabsLevel === null) ? null : g.eabsLevel;
     const parts = [];
-    parts.push(lvl === null ? 'réglage <span class="na">–</span>' : 'réglage <b>' + lvl + '</b><small>/15</small>');
+    parts.push(lvl === null ? 'réglage <span class="na">–</span>' : 'réglage <b>' + lvl + '</b><small>/5</small>');
     if (T.cfg && T.cfg.abs !== null) parts.push('indicateur t[4] ' + (T.cfg.abs ? 'actif' : 'à 0'));
     if (lvl === 0) parts.push('<span class="na">niveau 0 = frein régénératif désactivé</span>');
+    if (lvl === 5) parts.push('<span class="ok">maximum — rien à régler avant de rouler</span>');
     return parts.join(' · ');
   }
 
@@ -2209,7 +2234,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
       const cur = String(k) === String(T.gear);
       return `<div class="kv" ${cur ? 'style="color:var(--accent)"' : ''}>
         <span class="k">Vitesse ${k}${cur ? ' · active' : ''}</span>
-        <span class="v">${g.assistSpeedLimit} km/h <small>· ${g.fCurrent}/${g.rCurrent} A · eABS ${g.eabsLevel}</small></span>
+        <span class="v">${g.assistSpeedLimit} km/h <small>· ${g.fCurrent}/${g.rCurrent} A · eABS ${g.eabsLevel}/5</small></span>
       </div>`;
     }).join('');
   }
@@ -2447,8 +2472,23 @@ if (typeof window !== 'undefined') window.TEV = TEV;
   // point d'accès de débogage (lecture seule, pratique pour un rapport de bug)
   // `feed` ne parle pas à la trottinette : il injecte des octets déjà reçus dans le même
   // chemin de décodage que le Bluetooth. C'est ce qui permet de rejouer une capture hors ligne.
-  window.__FQ = { S, render, feed: onFrame, feedBytes: receiveBytes, recStart, recStop, recBody, recPreview,
+  // point d'accès de débogage (lecture seule, pratique pour un rapport de bug)
+  // `feed` parle à l'analyseur. `feedBytes` rejoue EXACTEMENT le chemin du transport réel :
+  // enregistrement via onRaw (receiveBytes) + décodage via onFrame. Rejouer seulement l'un des
+  // deux ne testait pas la page, mais un chemin qui n'existe pas.
+  window.__FQ = { S, render, feed: onFrame, feedBytes, recStart, recStop, recBody, recPreview,
                   recOfferDraft, recRestore, recDraft, recDropDraft };
+  function feedBytes(u) {
+    receiveBytes(u);
+    let pos = 0;
+    while (pos + 20 <= u.length) {
+      if (u[pos] !== 0x55) { pos++; continue; }
+      const t = Array.prototype.slice.call(u, pos, pos + 20);
+      if (TEV.crc8(t, 19) !== (t[19] & 0xFF)) { S.crcFail++; pos++; continue; }
+      onFrame(t);
+      pos += 20;
+    }
+  }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
