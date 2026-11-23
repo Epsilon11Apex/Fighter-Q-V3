@@ -126,6 +126,24 @@ function f52(q) {
   ok(d.lines.length >= d.count, 'lignes conservées', d.lines.length);
   ok(d.ended === true, 'capture marquée comme terminée');
 
+  console.log('\n[9] marquage automatique du freinage et de la régénération');
+  // le marquage se déclenche sur une chute de vitesse et un compteur qui augmente,
+  // évalués une fois par seconde réelle — il faut donc laisser le temps passer.
+  FQ.recStart();
+  FQ.feedBytes(f72(41, 14, 4));              // ~59,5 km/h
+  await new Promise((r) => setTimeout(r, 1100));
+  FQ.feedBytes(f72(96, 14, 4));              // ~25,8 km/h → chute de ~34 km/h
+  FQ.feedBytes(f73({ max: 59.5, trip: 0.5, odo: 902, regen: 4.2, q: 86 }));
+  await new Promise((r) => setTimeout(r, 1100));
+  FQ.feedBytes(f73({ max: 59.5, trip: 0.5, odo: 902, regen: 7.1, q: 86 }));  // regen +2,9 Wh
+  await new Promise((r) => setTimeout(r, 1100));
+  FQ.recStop();
+  const mbody = FQ.recBody();
+  ok(/# FREIN /.test(mbody), 'un freinage (chute de vitesse) est marqué automatiquement');
+  ok(/# REGEN \+/.test(mbody), 'une augmentation du compteur régénération est marquée');
+  ok(mbody.indexOf('# FREIN') < mbody.indexOf('# REGEN') || /# FREIN/.test(mbody) && /# REGEN/.test(mbody),
+     'les deux marqueurs sont dans le fichier');
+
   console.log('\n' + (fail ? fail + ' ÉCHEC(S)' : 'tout est vert'));
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
