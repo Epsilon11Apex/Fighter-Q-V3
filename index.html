@@ -518,6 +518,7 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
         <div class="stat"><div class="n" id="rec-time">0:00</div><div class="l">Durée</div></div>
         <div class="stat"><div class="n" id="rec-frames">0</div><div class="l">Trames</div></div>
         <div class="stat"><div class="n" id="rec-size">0 Ko</div><div class="l">Taille</div></div>
+        <div class="stat"><div class="n" id="rec-gaps">0</div><div class="l">Coupures</div></div>
       </div>
       <div class="toolbar">
         <button class="tbtn" id="rec-start" style="flex:1;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="7"/></svg>Démarrer</button>
@@ -544,6 +545,28 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
         <div id="rec-preview-wrap" style="margin-top:10px" hidden>
           <div style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim2);font-weight:700;margin-bottom:6px">Aperçu du fichier</div>
           <pre id="rec-preview" style="max-height:180px;overflow:auto;font-family:var(--mono);font-size:10px;line-height:1.5;color:#9fd8c2;background:#06090b;border:1px solid var(--line);border-radius:9px;padding:9px;margin:0;white-space:pre-wrap;word-break:break-word"></pre>
+        </div>
+      </div>
+      <div class="notice" id="rec-restore" hidden style="margin-top:12px;border-color:rgba(53,224,176,.4);background:rgba(53,224,176,.07)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent)"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
+        <div>
+          <b id="rec-restore-t">Capture retrouvée</b>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="tbtn" id="rec-restore-go" style="flex:1;justify-content:center;background:var(--accent-soft);border-color:rgba(53,224,176,.4);color:var(--accent)">Récupérer</button>
+            <button class="tbtn" id="rec-restore-no" style="flex:1;justify-content:center">Ignorer</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="notice" id="rec-warn" style="margin-top:12px;border-color:rgba(255,176,32,.35);background:rgba(255,176,32,.07)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--warn)"><path d="M12 9v4m0 3.5h.01"/><path d="M10.3 3.9L2.6 17a2 2 0 001.7 3h15.4a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+        <div>
+          <b>Sur iPhone, garde l'écran allumé pendant tout le relevé.</b>
+          iOS coupe le Bluetooth dès que l'écran s'éteint : la capture s'arrête et le lien tombe.
+          La page demande un verrou d'écran au démarrage, mais Apple peut le refuser — baisse la luminosité
+          au minimum, c'est le meilleur compromis. Si une coupure survient quand même, elle est écrite
+          dans le fichier (<span class="num"># INTERRUPTION</span>) et je saurai la lire.
+          <span id="rec-wake"></span>
         </div>
       </div>
       <p class="hint" id="rec-hint">
@@ -1121,8 +1144,11 @@ const TEV = (() => {
           T.fMotorTemp = t[9] & 0xFF;                  // valide si > 0
           T.rMotorTemp = t[17] & 0xFF;
           T.doubleMotor = ((t[3] >> 3) & 1) === 1;
-          // NOTE (capture réelle, 23/11) : au repos t[15..16] = 75 30 (30000) et t[7..8] = 75 30
-          // aussi. Le champ vitesse reste donc à confirmer sur une capture EN ROULAGE.
+          // VITESSE — deux pièges, tous deux levés par les captures du 23/11 :
+          //  1. t[7..8] et t[15..16] portent la MÊME valeur (les deux moitiés de trame se répètent).
+          //     On lit t[15..16] pour rester aligné sur le code de référence FrameParser.java.
+          //  2. au repos le champ vaut 75 30 = 30000 (sentinelle), pas 0. D'où le seuil ci-dessous.
+          // Vérifié 2× : raw=41 → 59,5 km/h = max machine (troisième capture) ; raw=44 → 55,4 = max (deuxième).
           T.speedRaw = u16(t, 15);
           let v = 0;
           if (T.speedRaw > 0) v = 287.0 * (T.cfg.wheel || 8.5) / T.speedRaw;
@@ -1343,7 +1369,8 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     lookback: 60,
     gaugeMax: 40,
     maxSeen: 0,
-    rec: { on: false, t0: 0, ms: 0, timer: null, lines: [], count: 0, size: 0 },
+    rec: { on: false, t0: 0, ms: 0, timer: null, lines: [], count: 0, size: 0, lastSec: -1,
+           wakeLock: null, wakeState: 'inconnu', gaps: 0, lastGapAt: 0, savedAt: 0 },
     log: [],
     diag: false,
     redact: true,
@@ -1406,19 +1433,64 @@ if (typeof window !== 'undefined') window.TEV = TEV;
   }
   const escapeHtml = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
+  /* ───────────── verrou d'écran ─────────────
+     Sur iPhone, l'écran qui s'éteint = Bluetooth coupé = capture morte. L'API Screen Wake Lock
+     (Safari 16.4+) le demande explicitement. Elle ne garantit rien : le système peut refuser, et
+     le verrou saute dès que l'onglet passe en arrière-plan. On le reprend au retour, et on dit
+     franchement à l'utilisateur ce que le navigateur a répondu. */
+  async function wakeOn() {
+    if (!('wakeLock' in navigator)) { wakeLabel('refusé'); return false; }
+    try {
+      S.rec.wakeLock = await navigator.wakeLock.request('screen');
+      wakeLabel('tenu');
+      S.rec.wakeLock.addEventListener('release', () => {
+        S.rec.wakeLock = null;
+        if (S.rec.on) wakeLabel('relâché'); else wakeLabel('arrêté');
+      });
+      return true;
+    } catch (e) {
+      S.rec.wakeLock = null; wakeLabel('refusé');
+      return false;
+    }
+  }
+  function wakeOff() {
+    if (S.rec.wakeLock) { try { S.rec.wakeLock.release(); } catch (e) {} }
+    S.rec.wakeLock = null; wakeLabel('arrêté');
+  }
+  function wakeLabel(state) {
+    S.rec.wakeState = state;
+    const el = $('rec-wake');
+    if (!el) return;
+    const map = {
+      tenu: ' <b style="color:var(--accent)">· verrou d\'écran obtenu</b>',
+      refusé: ' <b style="color:var(--warn)">· verrou d\'écran refusé par le navigateur</b>',
+      relâché: ' <b style="color:var(--warn)">· verrou d\'écran relâché</b>',
+      arrêté: '',
+    };
+    el.innerHTML = map[state] || '';
+  }
+
   /* ───────────── enregistreur de session ─────────────
      But : récolter de la donnée réelle sans dépendre de ce qui est affiché.
      Écrit une ligne par trame (horodatage + octets), ou les valeurs décodées si demandé. */
-  function recPush(text, nBytes) {
+  function recPush(text, nBytes, kind) {
     const R = S.rec;
     const d = new Date();
     const ts = pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + String(d.getMilliseconds()).padStart(3, '0');
     R.lines.push(ts + '\t' + text);
-    R.count++;
+    // TRAMES compte bien les trames RÉCÉIVES, pas les lignes d'état (une par seconde,
+    // elles gonflent le compteur) ni le keep-alive qu'on émet (ce n'est pas de la télémétrie).
+    // C'est ce compteur qu'on vérifie pour « au moins ~4 trames/s de la machine ».
+    if (kind === 'rx') R.count++;
+    else if (kind === 'etat') R.etats = (R.etats || 0) + 1;
+    else if (kind === 'tx') R.tx = (R.tx || 0) + 1;
+    else R.count++;
     R.size += text.length + 14;
+    R.lastPushAt = Date.now();
     if (S.rec.on && $('v-log').classList.contains('on')) {
       $('rec-frames').textContent = String(R.count);
       $('rec-size').textContent = (R.size / 1024).toFixed(1) + ' Ko';
+      if ($('rec-gaps')) $('rec-gaps').textContent = String(R.gaps || 0);
     }
   }
   function recTick() {
@@ -1428,31 +1500,54 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     const s = Math.floor(R.ms / 1000);
     const el = $('rec-time');
     if (el) el.textContent = Math.floor(s / 60) + ':' + pad2(s % 60);
+
+    /* TROU DE CAPTURE — la preuve que iOS a suspendu la page.
+       Sans ça, un trou de 47 s ressemble à « la machine n'a rien envoyé », et j'ai déjà
+       interprété du vide comme un résultat. On écrit le trou DANS le fichier, à sa place. */
+    if (R.lastPushAt && Date.now() - R.lastPushAt > 3000) {
+      const gap = Math.round((Date.now() - R.lastPushAt) / 1000);
+      // recPush horodate au moment de l'appel : on écrit donc la ligne de trou avant de reprendre
+      R.lines.push('# INTERRUPTION ' + gap + ' s (page suspendue — écran éteint ou onglet en arrière-plan)');
+      R.gaps = (R.gaps || 0) + 1;
+      R.lastPushAt = Date.now();
+      if (S.diag) logLine('er', 'trou de capture : ' + gap + ' s');
+    }
+
+    /* SAUVEGARDE — si Bluefy recharge la page (mémoire faible, retour au premier plan),
+       la capture ne doit pas disparaître. Toutes les 5 s, on écrit dans localStorage. */
+    if (Date.now() - (R.savedAt || 0) > 5000) { R.savedAt = Date.now(); recSaveDraft(); }
     // une ligne d'état par seconde, en clair : c'est ce qui rend le fichier lisible à l'œil
     if (s !== R.lastSec) {
       R.lastSec = s;
       const T = S.parser.T;
       const fmt1 = (v) => (v === null || v === undefined || Number.isNaN(v)) ? '-' : Number(v).toFixed(1);
+      // Une ligne par seconde, en clair : c'est ce qui rend le fichier lisible à l'œil,
+      // et ce qui permet de recouper à la seconde près avec ce que montre l'app officielle.
       recPush('ETAT t=' + s + 's'
         + ' | v=' + (T.have72 ? fmt1(T.speed) : '-')
+        + ' vmax=' + (T.have73 ? fmt1(T.maxSpeed) : '-')
         + ' gear=' + (T.have71 ? T.gear : '-')
         + ' volt=' + ((T.have52 && T.volt > 0) ? fmt1(T.volt) : '-')
         + ' amp=' + fmt1(T.current)
         + ' odo=' + (T.have73 ? T.odometer : '-')
         + ' trip=' + (T.have73 ? fmt1(T.trip) : '-')
-        + ' T_av=' + (T.fMotorTemp || 0)
-        + ' T_ar=' + (T.rMotorTemp || 0)
-        + ' bat52=' + (T.raw52 ? T.raw52.slice(8, 12).map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(',') : '-'), 0);
+        + ' regen=' + (T.have73 ? fmt1(T.energyFb) : '-')
+        + ' T_ctl=' + (T.fMotorTemp || 0)
+        + ' bat52=' + (T.raw52 ? T.raw52.slice(8, 12).map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(',') : '-')
+        + ' t72_13_14=' + (T.lastBytes ? [T.lastBytes[13], T.lastBytes[14]].join(',') : '-'), 0, 'etat');
     }
   }
   function recStart() {
     const R = S.rec;
     R.on = true; R.t0 = Date.now(); R.ms = 0; R.lines = []; R.count = 0; R.size = 0; R.lastSec = -1;
+    R.gaps = 0; R.lastPushAt = Date.now(); R.savedAt = 0; R.endedAt = 0;
     R.lines.push('# Fighter Q · cockpit BLE · ' + BUILD + ' · début ' + new Date().toISOString());
     R.lines.push('# format: horodatage<TAB>source<TAB>octets');
     R.timer = setInterval(recTick, 500);
     $('rec-tag').textContent = 'en cours'; $('rec-tag').style.color = 'var(--bad)';
     $('rec-start').disabled = true; $('rec-stop').disabled = false; $('rec-save').disabled = true;
+    wakeOn();
+    recSaveDraft(true);
     toast('Enregistrement démarré');
   }
   function recStop() {
@@ -1460,12 +1555,79 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     if (!R.on) return;
     R.on = false;
     if (R.timer) { clearInterval(R.timer); R.timer = null; }
-    R.lines.push('# fin ' + new Date().toISOString() + ' · ' + R.count + ' trames');
+    R.lines.push('# fin ' + new Date().toISOString() + ' · ' + R.count + ' trames RX'
+      + (R.etats ? ' · ' + R.etats + ' lignes état' : '')
+      + (R.gaps ? ' · ' + R.gaps + ' interruption(s)' : ''));
+    R.endedAt = Date.now();
     $('rec-tag').textContent = R.count ? 'prêt' : 'vide';
     $('rec-tag').style.color = R.count ? 'var(--accent)' : '';
     $('rec-start').disabled = false; $('rec-stop').disabled = true; $('rec-save').disabled = !R.count;
+    wakeOff();
+    recSaveDraft(true);
     recPreview();
     toast(R.count ? R.count + ' trames capturées' : 'Aucune trame capturée');
+  }
+
+  /* ───────────── brouillon persistant ─────────────
+     Le risque réel d'un relevé de 8 minutes : que la page soit rechargée par iOS en cours de route.
+     On garde la capture dans localStorage et on propose de la récupérer au démarrage suivant.
+     Rien ne quitte l'appareil : c'est le même stockage que le navigateur utilise pour ses onglets. */
+  const DRAFT_KEY = 'fq.rec.draft.v1';
+  function recSaveDraft(force) {
+    const R = S.rec;
+    if (!R.lines.length) return;
+    if (!force && !R.on) return;
+    try {
+      const payload = {
+        v: 1, build: BUILD, savedAt: new Date().toISOString(),
+        startedAt: R.t0 ? new Date(R.t0).toISOString() : null,
+        ended: !R.on, gaps: R.gaps || 0, count: R.count, etats: R.etats || 0, tx: R.tx || 0,
+        lines: R.lines,
+      };
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+    } catch (e) {
+      // quota dépassé : on n'écrit plus, mais on ne casse surtout pas l'enregistrement en cours
+      if (S.diag) logLine('er', 'sauvegarde impossible : ' + (e && e.name));
+    }
+  }
+  function recDraft() {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (!raw) return null;
+      const d = JSON.parse(raw);
+      return (d && Array.isArray(d.lines) && d.lines.length) ? d : null;
+    } catch (e) { return null; }
+  }
+  function recDropDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch (e) {} }
+  function recOfferDraft() {
+    const d = recDraft();
+    const wrap = $('rec-restore');
+    if (!d || !wrap) return;
+    // une capture qu'on vient d'arrêter n'a pas besoin d'être « récupérée » : elle est à l'écran
+    const hhmm = (s) => { const x = new Date(s); return pad2(x.getHours()) + 'h' + pad2(x.getMinutes()); };
+    const when = d.startedAt ? hhmm(d.startedAt) : '?';
+    const mins = Math.max(1, Math.round((Date.parse(d.savedAt) - Date.parse(d.startedAt || d.savedAt)) / 60000));
+    $('rec-restore-t').innerHTML = 'Capture non terminée retrouvée — '
+      + (d.ended ? 'arrêtée' : 'interrompue') + ' vers ' + when + ' · ' + d.count + ' trames · ~' + mins + ' min'
+      + (d.gaps ? ' · ' + d.gaps + ' interruption(s)' : '');
+    wrap.hidden = false;
+  }
+  function recRestore() {
+    const d = recDraft();
+    if (!d) return;
+    const R = S.rec;
+    R.lines = d.lines.slice();
+    R.count = d.count || 0;
+    R.size = R.lines.reduce((n, l) => n + l.length + 14, 0);
+    R.on = false; R.gaps = d.gaps || 0;
+    $('rec-restore').hidden = true;
+    $('rec-tag').textContent = 'récupéré';
+    $('rec-tag').style.color = 'var(--accent)';
+    $('rec-save').disabled = false;
+    $('rec-frames').textContent = String(R.count);
+    $('rec-size').textContent = (R.size / 1024).toFixed(1) + ' Ko';
+    recPreview();
+    toast('Capture récupérée — enregistre-la maintenant');
   }
   function recBody() {
     return S.rec.lines.map((l) => l.startsWith('#') ? l : mask(l)).join('\n');
@@ -1532,17 +1694,12 @@ if (typeof window !== 'undefined') window.TEV = TEV;
       onLog: (kind, msg) => logLine(kind, msg),
       onStatus: (st) => setStatus(st),
       onFrame: onFrame,
-      onRaw: (u) => {
-        S.bytes += u.length;
-        // l'enregistreur ne dépend ni du journal affiché ni du mode brut
-        if (S.rec.on) recPush('RX ' + hex(u), u.length);
-        if (S.diag) logLine('rx', 'RX ' + u.length + 'o │ ' + hex(u));
-      },
+      onRaw: receiveBytes,
       onCrcFail: () => { S.crcFail++; if (S.diag) logLine('er', 'CRC invalide, resynchronisation'); },
       onTx: (u) => {
         S.writes++;
         $('wr-state').textContent = String(S.writes);
-        if (S.rec.on) recPush('TX ' + hex(u), u.length);
+        if (S.rec.on) recPush('TX ' + hex(u), u.length, 'tx');
         if (S.diag) logLine('tx', 'TX keep-alive │ ' + hex(u));
       },
     });
@@ -1608,6 +1765,15 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     setStatus('demo');
     S.demo = new TEV.Demo(onFrame, { bms: !!($('demo-bms') && $('demo-bms').checked) });
     S.demo.start();
+  }
+
+  /* Octets bruts arrivant du lien : un seul point d'entrée, partagé par le Bluetooth,
+     le mode démo et le rejeu hors ligne. L'enregistreur ne dépend ni du journal affiché
+     ni du mode brut : c'est ce qui rend une capture utilisable même écran éteint. */
+  function receiveBytes(u) {
+    S.bytes += u.length;
+    if (S.rec.on) recPush('RX ' + hex(u), u.length, 'rx');
+    if (S.diag) logLine('rx', 'RX ' + u.length + 'o │ ' + hex(u));
   }
 
   /* ───────────── réception d'une trame ───────────── */
@@ -1847,7 +2013,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     setRow('s-pack', T.have71 && c.packVolt ? c.packVolt + ' <small>V — à confirmer en roulage</small>' : null);
     setRow('s-protemp', T.have71 ? c.sysProTemp + ' <small>°C — seuil de protection, pas une mesure</small>' : null);
     setRow('s-start', T.have71 ? (c.startMode ? 'kickstart' : 'départ arrêté') : null);
-    setRow('s-abs', T.have71 ? (c.abs ? 'eABS actif · niveau ' + ((S.parser.T.gearCache[T.gear] || {}).eabsLevel ?? '–') : 'inactif') : null);
+    setRow('s-abs', T.have71 ? eabsRow(T) : null);
     setRow('s-cruise', T.have71 ? (c.cruise === 2 ? 'manuel' : c.cruise === 1 ? 'auto' : 'désactivé') : null);
     setRow('s-econ', T.have71 ? (c.econ ? 'activé' : 'désactivé') : null);
     setRow('s-unit', T.have71 ? (c.unitMile ? 'miles' : 'km/h') : null);
@@ -1858,6 +2024,21 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     renderFrameDiag();
     drawTrace();
     renderStats();
+  }
+
+  /* E-ABS — deux champs distincts dans 55 71, et ils ne disent pas la même chose :
+       • le RÉGLAGE est le quartet haut de t[9]  → 0x55 donne 5 (sur 15)
+       • l'INDICATEUR est le bit 3 de t[4]       → 0
+     Afficher l'un à la place de l'autre était mon erreur (l'onglet annonçait « eABS inactif »
+     alors que le réglage est à 5). On montre les deux, sans conclure à la place de la machine. */
+  function eabsRow(T) {
+    const g = T.gearCache[T.gear] || {};
+    const lvl = (g.eabsLevel === undefined || g.eabsLevel === null) ? null : g.eabsLevel;
+    const parts = [];
+    parts.push(lvl === null ? 'réglage <span class="na">–</span>' : 'réglage <b>' + lvl + '</b><small>/15</small>');
+    if (T.cfg && T.cfg.abs !== null) parts.push('indicateur t[4] ' + (T.cfg.abs ? 'actif' : 'à 0'));
+    if (lvl === 0) parts.push('<span class="na">niveau 0 = frein régénératif désactivé</span>');
+    return parts.join(' · ');
   }
 
   function tempHtml(v) {
@@ -1978,7 +2159,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     '55 44': ['Firmware afficheur / batterie / éclairage', 'absent de la capture'],
     '55 45': ['Firmware des contrôleurs', 'absent de la capture'],
     '55 51': ['Tensions cellules 1-8', 'absence confirmée (pas de BMS)'],
-    '55 52': ['Batterie : températures réelles', '2 sondes valides et vivantes (46→48 °C) — tension toujours inexploitable'],
+    '55 52': ['Batterie : trame en stub', 'aucune température (t[8..11] = valeur unique répétée) — tension à 0,0 V'],
     '55 53': ['Capacité / équilibrage', 'absence confirmée'],
     '55 54': ['Alertes BMS', 'absent de la capture'],
     '55 55': ['Tensions cellules 9-16', 'absence confirmée'],
@@ -2182,6 +2363,29 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     $('rec-save').addEventListener('click', recSave);
     $('rec-share').addEventListener('click', recShare);
     $('rec-copy').addEventListener('click', recCopy);
+    $('rec-restore-go').addEventListener('click', recRestore);
+    $('rec-restore-no').addEventListener('click', () => { recDropDraft(); $('rec-restore').hidden = true; });
+
+    /* Le verrou d'écran saute dès que la page passe en arrière-plan — c'est la règle du navigateur.
+       On le reprend au retour, et on note le trou plutôt que de le laisser passer pour du silence radio. */
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') {
+        if (S.rec.on) S.rec.hiddenAt = Date.now();
+        return;
+      }
+      if (S.rec.on) {
+        if (S.rec.hiddenAt) {
+          const away = Math.round((Date.now() - S.rec.hiddenAt) / 1000);
+          if (away >= 3) {
+            S.rec.lines.push('# INTERRUPTION ' + away + ' s (page en arrière-plan)');
+            S.rec.gaps = (S.rec.gaps || 0) + 1;
+            S.rec.lastPushAt = Date.now();
+          }
+          S.rec.hiddenAt = 0;
+        }
+        wakeOn();
+      }
+    });
     $('t-sub').addEventListener('click', resubscribeAll);
     $('t-diag').addEventListener('click', () => {
       S.diag = !S.diag;
@@ -2221,6 +2425,8 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     $('devline').textContent = 'cockpit BLE · lecture seule';
 
     logLine('hd', 'cockpit ' + BUILD + ' chargé');
+    recOfferDraft();
+    if (!('wakeLock' in navigator)) wakeLabel('refusé');
     logLine('hd', 'profil machine : Fighter Mini Q / Fighter Q · pas de smart BMS (aucune trame cellule attendue)');
     logLine(TEV.SELFTEST.ok ? 'ok' : 'er',
       'auto-test protocole ' + (TEV.SELFTEST.ok ? 'OK' : 'ÉCHEC') + ' · keep-alive ' + TEV.SELFTEST.hex);
@@ -2239,12 +2445,15 @@ if (typeof window !== 'undefined') window.TEV = TEV;
   }
 
   // point d'accès de débogage (lecture seule, pratique pour un rapport de bug)
-  window.__FQ = { S, render };
+  // `feed` ne parle pas à la trottinette : il injecte des octets déjà reçus dans le même
+  // chemin de décodage que le Bluetooth. C'est ce qui permet de rejouer une capture hors ligne.
+  window.__FQ = { S, render, feed: onFrame, feedBytes: receiveBytes, recStart, recStop, recBody, recPreview,
+                  recOfferDraft, recRestore, recDraft, recDropDraft };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();
 
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f2fcd249cce1cc',t:'MTc5NTQ2NjQxMQ=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f2fcd249cce1cc',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
