@@ -519,6 +519,22 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
         <label class="rec-opt"><input type="checkbox" id="rec-hex" checked> Trames en hexadécimal</label>
         <label class="rec-opt"><input type="checkbox" id="rec-parsed"> Valeurs décodées</label>
       </div>
+
+      <!-- partage direct : sur iPhone, le fichier va dans Fichiers / Mail / Drive sans passer par les téléchargements -->
+      <div id="share-wrap" style="margin-top:10px">
+        <button class="tbtn" id="rec-share" style="width:100%;justify-content:center;background:var(--accent-soft);border-color:rgba(53,224,176,.4);color:var(--accent)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3m0 0L8 7m4-4l4 4"/><path d="M5 13v6a2 2 0 002 2h10a2 2 0 002-2v-6"/></svg>
+          Partager directement (iPhone)
+        </button>
+        <button class="tbtn" id="rec-copy" style="width:100%;justify-content:center;margin-top:8px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h8"/></svg>
+          Copier tout le texte
+        </button>
+        <div id="rec-preview-wrap" style="margin-top:10px" hidden>
+          <div style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim2);font-weight:700;margin-bottom:6px">Aperçu du fichier</div>
+          <pre id="rec-preview" style="max-height:180px;overflow:auto;font-family:var(--mono);font-size:10px;line-height:1.5;color:#9fd8c2;background:#06090b;border:1px solid var(--line);border-radius:9px;padding:9px;margin:0;white-space:pre-wrap;word-break:break-word"></pre>
+        </div>
+      </div>
       <p class="hint" id="rec-hint">
         L'enregistreur capture <b>tout</b>, que le journal soit affiché ou non — c'est le seul mode fiable pour
         un relevé long. Les trames sont écrites en clair ; ton FIN et les identifiants sont anonymisés dans le fichier.
@@ -1443,16 +1459,63 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     $('rec-tag').textContent = R.count ? 'prêt' : 'vide';
     $('rec-tag').style.color = R.count ? 'var(--accent)' : '';
     $('rec-start').disabled = false; $('rec-stop').disabled = true; $('rec-save').disabled = !R.count;
+    recPreview();
     toast(R.count ? R.count + ' trames capturées' : 'Aucune trame capturée');
+  }
+  function recBody() {
+    return S.rec.lines.map((l) => l.startsWith('#') ? l : mask(l)).join('\n');
+  }
+  function recName() {
+    return 'fighter-q-capture-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.txt';
+  }
+  /* Chemin fiable sur iPhone : Web Share API niveau 2 (fichier joint) → Fichiers / Mail / Drive.
+     Si le navigateur ne la supporte pas, on retombe sur le téléchargement classique. */
+  async function recShare() {
+    const R = S.rec;
+    if (!R.lines.length) { toast('Rien à partager'); return; }
+    const txt = recBody();
+    try {
+      const file = new File([txt], recName(), { type: 'text/plain' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Capture Fighter Q' });
+        toast('Partagé');
+        return;
+      }
+      if (navigator.share) {
+        await navigator.share({ title: 'Capture Fighter Q', text: txt.slice(0, 100000) });
+        toast('Texte partagé');
+        return;
+      }
+      toast('Partage indisponible : utilise Enregistrer ou Copier');
+    } catch (e) {
+      if (String(e).indexOf('cancel') < 0) toast('Partage annulé');
+    }
+  }
+  async function recCopy() {
+    if (!S.rec.lines.length) { toast('Rien à copier'); return; }
+    try { await navigator.clipboard.writeText(recBody()); toast('Capture copiée dans le presse-papier'); }
+    catch (e) { toast('Copie refusée : utilise Partager'); }
+  }
+  function recPreview() {
+    const R = S.rec;
+    const wrap = $('rec-preview-wrap');
+    if (!R.lines.length) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+    const txt = recBody().split('\n');
+    const head = txt.slice(0, 6), tail = txt.slice(-4);
+    $('rec-preview').textContent = txt.length <= 11
+      ? txt.join('\n')
+      : head.join('\n') + '\n…  ' + (txt.length - 10) + ' lignes  …\n' + tail.join('\n');
+    wrap.scrollIntoView({ block: 'nearest' });
   }
   function recSave() {
     const R = S.rec;
     if (!R.lines.length) { toast('Rien à enregistrer'); return; }
-    const body = R.lines.map((l) => l.startsWith('#') ? l : mask(l)).join('\n');
+    const body = recBody();
     const blob = new Blob([body], { type: 'text/plain' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'fighter-q-capture-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.txt';
+    a.download = recName();
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     toast('Fichier enregistré');
@@ -2148,6 +2211,8 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     $('rec-start').addEventListener('click', recStart);
     $('rec-stop').addEventListener('click', recStop);
     $('rec-save').addEventListener('click', recSave);
+    $('rec-share').addEventListener('click', recShare);
+    $('rec-copy').addEventListener('click', recCopy);
     $('t-sub').addEventListener('click', resubscribeAll);
     $('t-diag').addEventListener('click', () => {
       S.diag = !S.diag;
@@ -2181,6 +2246,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
   /* ───────────── démarrage ───────────── */
   function boot() {
     initTabs(); initSheet(); initLogTools();
+    if (!navigator.share) $('rec-share').style.display = 'none';
     drawTicks(); drawCells();
     $('build-tag').textContent = BUILD;
     $('devline').textContent = 'cockpit BLE · lecture seule';
@@ -2211,5 +2277,5 @@ if (typeof window !== 'undefined') window.TEV = TEV;
 })();
 
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f180dfec5270e7',t:'MTc5NTQ1MDg0OQ=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f180dfec5270e7',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f18c4d095e6507',t:'MTc5NTQ1MTMxNw=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f18c4d095e6507',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
