@@ -238,6 +238,9 @@ nav.tabs button.on .pip{opacity:1}
 .notice svg{width:17px;height:17px;flex:0 0 auto;margin-top:1px;color:var(--blue)}
 .notice b{color:#e3f1fd}
 .notice .num{color:var(--accent)}
+.diag-block{margin-top:10px;padding:9px 11px;border-radius:9px;background:rgba(0,0,0,.22);border:1px solid var(--line)}
+.diag-block .lbl{display:block;font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--dim2);font-weight:700;margin-bottom:4px}
+.diag-block code{display:block;font-family:var(--mono);font-size:11px;line-height:1.55;color:#9fd8c2;word-break:break-word;white-space:pre-wrap}
 .hint{margin:11px 0 0;font-size:10.8px;line-height:1.5;color:var(--dim2)}
 .hint .num{color:var(--dim)}
 .toast{position:fixed;left:50%;bottom:calc(96px + var(--safe-b));transform:translate(-50%,14px);z-index:120;background:#1b262f;border:1px solid var(--line2);color:var(--ink);padding:11px 16px;border-radius:12px;font-size:13px;font-weight:600;opacity:0;transition:.25s;pointer-events:none;max-width:88vw;text-align:center;box-shadow:0 12px 30px -12px #000}
@@ -408,6 +411,16 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
     </div>
 
     <div class="card">
+      <div class="card-h"><span class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.8V5a2 2 0 10-4 0v9.8a4 4 0 104 0z"/></svg>Températures batterie</span><span class="tag" id="battemp-tag">55 52</span></div>
+      <div id="battemps"><div class="empty" style="color:var(--dim2)">Aucune trame <span class="num">55 52</span> reçue pour l'instant.</div></div>
+      <p class="hint">
+        Les 7 sondes du pack sont en <span class="num">55 52</span> t[10..16], avec un offset de −40 °C.
+        Ce sont les <b>seules</b> températures de batterie du protocole : sans smart BMS, il n'en existe pas d'autre.
+        Les températures que la page affiche par ailleurs (moteurs) viennent de <span class="num">55 72</span>.
+      </p>
+    </div>
+
+    <div class="card">
       <div class="card-h"><span class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 3.5h.01"/><path d="M10.3 3.9L2.6 17a2 2 0 001.7 3h15.4a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>Alertes & témoins</span><span class="tag" id="err-tag">contrôleur</span></div>
       <div id="errlist"><div class="empty" style="color:var(--dim2)">En attente des trames <span class="num">55 72</span> / <span class="num">55 54</span>…</div></div>
       <div class="kv" style="margin-top:6px"><span class="k">Témoins embarqués</span><span class="v na" id="flags">–</span></div>
@@ -457,6 +470,17 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
     <div class="card">
       <div class="card-h"><span class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Limites par vitesse</span><span class="tag">observées</span></div>
       <div id="gear-table"><div class="empty" style="color:var(--dim2)">Les valeurs apparaissent après réception des trames 55 71 par vitesse.</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 18V9m4 9V5m4 13v-7m4 7V7m4 11v-4"/></svg>Diagnostic des trames</span><span class="tag">réel</span></div>
+      <div id="framelist"><div class="empty" style="color:var(--dim2)">Aucune trame reçue pour l'instant.</div></div>
+      <div class="diag-block"><span class="lbl">Dernière trame brute</span><code id="lastframe">–</code></div>
+      <div class="diag-block"><span class="lbl">Octets encore inexpliqués</span><code id="unknown-bytes">–</code></div>
+      <p class="hint">
+        Ce tableau vient de tes trames réelles : il sert à décider quoi coder ensuite. Les octets listés comme
+        « inexploités » sont ceux dont je n'ai pas pu prouver le sens — mieux vaut les afficher que les deviner.
+      </p>
     </div>
 
     <div class="card">
@@ -914,6 +938,16 @@ const TEV = (() => {
   ];
 
   function u16(t, i) { return ((t[i] & 0xFF) << 8) | (t[i + 1] & 0xFF); }
+
+  /* Une trame peut arriver avec des octets de remplissage (0x00, 0xFF, sentinelles).
+     Cette couche refuse les valeurs physiquement impossibles au lieu de les afficher :
+     c'est ce qui évite un « -1000 A » ou un « -40 °C » à l'écran. */
+  const SANE = {
+    volt:  (v) => Number.isFinite(v) && v >= 20 && v <= 100,
+    amp:   (a) => Number.isFinite(a) && Math.abs(a) <= 150,
+    temp:  (c) => Number.isFinite(c) && c > -30 && c < 120,
+    pct:   (n) => Number.isFinite(n) && n >= 0 && n <= 100,
+  };
   function ascii(t, a, b) {
     let s = '';
     for (let i = a; i <= b && i < 20; i++) {
@@ -932,12 +966,14 @@ const TEV = (() => {
         have52: false, have53: false, have71: false, have72: false, have73: false,
         lock: null, soh: 0, poleVolt: 0, maxCellTemp: null, minCellTemp: null,
         cellMv: new Array(CELL_SLOTS).fill(0), cellCount: 0,
+        batTemp: [], haveCurrent: false,
         capacity: 0, chargeCounter: 0, maxCellV: 0, minCellV: 0, balance: 0,
         errors: null, ecu1: null, ecu2: null, doubleMotor: false,
         fMotorCurrent: 0, rMotorCurrent: 0, fMotorTemp: 0, rMotorTemp: 0,
-        avgSpeed: 0, maxSpeed: 0, trip: 0, odometer: 0, energyFb: 0,
+        avgSpeed: 0, maxSpeed: 0, trip: 0, odometer: 0, energyFb: 0, raw73_t13: null, raw73_t15: null,
         atLevel: 0, batLock: false, gpsLock: false, powerMode: false,
         lightSensor: false, voice: false,
+        byFrame: {}, lastBytes: null, lockByte: null, bmsInvalid: 0, raw52: null,
         fin: '', swVer: '', hwVer: '', fwBuild: 0, displayVer: '', batFwVer: '', lcFwVer: '',
         rearCtrlVer: '', frontCtrlVer: '', batCode: '',
         // paramètres contrôleur (55 71)
@@ -952,20 +988,50 @@ const TEV = (() => {
     parse(t) {
       const T = this.T;
       T.frames++; T.lastFrameCmd = t[1] & 0xFF;
+      const id = '55 ' + (t[1] & 0xFF).toString(16).toUpperCase().padStart(2, '0');
+      T.byFrame = T.byFrame || {};
+      T.byFrame[id] = (T.byFrame[id] || 0) + 1;
+      T.lastBytes = t.slice();
       switch (T.lastFrameCmd) {
         case 0x51: this._cells(t, 0); break;
         case 0x55: this._cells(t, 8); break;
         case 0x56: this._cells(t, 16); break;
-        case 0x52:
-          T.volt = u16(t, 2) * 0.1;
+        case 0x52: {
+          // Trame batterie. Sur une machine sans smart BMS elle arrive parfois en stubs
+          // (tension 0,00 V, courants sentinelles) : on la rejette au lieu de l'afficher.
+          T.raw52 = t.slice();
+          const rawV = u16(t, 2);
+          const v = u16(t, 2) * 0.1;
+          // On conserve les températures même si la tension est inexploitable :
+          // c'est un diagnostic séparé, et c'est justement ce qui nous intéresse ici.
+          T.batTemp = [];
+          for (let i = 0; i < 7; i++) {
+            const raw = t[10 + i] & 0xFF;
+            T.batTemp.push({ raw, c: raw - 40, valid: raw !== 0 && SANE.temp(raw - 40) });
+          }
+          if (!SANE.volt(v)) { T.bmsInvalid = (T.bmsInvalid || 0) + 1; break; }
+          const a = u16(t, 6) * 0.1 - 1000;            // négatif = régénération
+          const tMax = (t[17] & 0xFF) - 40, tMin = (t[18] & 0xFF) - 40;
+          T.volt = v;
           T.poleVolt = u16(t, 4) * 0.1;
-          T.current = u16(t, 6) * 0.1 - 1000;          // négatif = régénération
-          T.soc = t[8] & 0xFF;
-          T.soh = t[9] & 0xFF;
-          T.maxCellTemp = (t[17] & 0xFF) - 40;
-          T.minCellTemp = (t[18] & 0xFF) - 40;
+          // 55 52 t[10..16] : 7 sondes du pack (cellule 0-2, MOS 0-1, carte BMS 0-1),
+          // décodées avec un offset de -40 °C comme dans FrameParser.java (batTemp[]).
+          T.batTemp = [];
+          for (let i = 0; i < 7; i++) {
+            const raw = t[10 + i] & 0xFF;
+            T.batTemp.push({ raw, c: raw - 40, valid: raw !== 0 && SANE.temp(raw - 40) });
+          }
+          // haveCurrent : si t[6..7] = 0, le courant n'est pas transmis (cas Blade Mini).
+          T.haveCurrent = u16(t, 6) !== 0;
+          T.current = (T.haveCurrent && SANE.amp(a)) ? a : null;
+          T.soc = SANE.pct(t[8]) ? (t[8] & 0xFF) : null;
+          T.soh = SANE.pct(t[9]) ? (t[9] & 0xFF) : null;
+          T.maxCellTemp = SANE.temp(tMax) ? tMax : null;
+          T.minCellTemp = SANE.temp(tMin) ? tMin : null;
+          T.lastBmsOk = Date.now ? Date.now() : 0;
           T.have52 = true;
           break;
+        }
         case 0x53:
           T.balance = t[7] & 0xFF;
           T.capacity = u16(t, 8);
@@ -1005,11 +1071,14 @@ const TEV = (() => {
         case 0x71: this._cfg(t); break;
         case 0x72: {
           T.ecu1 = t[10] & 0xFF; T.ecu2 = t[11] & 0xFF;
-          T.fMotorCurrent = u16(t, 4) * 0.1;
-          T.rMotorCurrent = u16(t, 12) * 0.1;
+          const fc = u16(t, 4) * 0.1, rc = u16(t, 12) * 0.1;
+          T.fMotorCurrent = SANE.amp(fc) ? fc : null;
+          T.rMotorCurrent = SANE.amp(rc) ? rc : null;
           T.fMotorTemp = t[9] & 0xFF;                  // valide si > 0
           T.rMotorTemp = t[17] & 0xFF;
           T.doubleMotor = ((t[3] >> 3) & 1) === 1;
+          // NOTE (capture réelle, 23/11) : au repos t[15..16] = 75 30 (30000) et t[7..8] = 75 30
+          // aussi. Le champ vitesse reste donc à confirmer sur une capture EN ROULAGE.
           T.speedRaw = u16(t, 15);
           let v = 0;
           if (T.speedRaw > 0) v = 287.0 * (T.cfg.wheel || 8.5) / T.speedRaw;
@@ -1025,6 +1094,8 @@ const TEV = (() => {
           T.trip = u16(t, 6) * 0.1;
           T.odometer = ((t[8] & 0xFF) << 16) | ((t[9] & 0xFF) << 8) | (t[10] & 0xFF);
           T.energyFb = u16(t, 11) * 0.1;
+          T.raw73_t13 = t[13] & 0xFF;   // constant à 0x4E (78) sur la capture : candidat SOC, à confirmer
+          T.raw73_t15 = t[15] & 0xFF;   // 0x34 (52) : candidat tension pack configurée
           const s2 = t[16] & 0xFF;
           T.batLock = (s2 & 0x01) !== 0;
           T.gpsLock = (s2 & 0x02) !== 0;
@@ -1050,7 +1121,10 @@ const TEV = (() => {
     _cfg(t) {
       const T = this.T; const c = T.cfg;
       T.gear = t[3] & 0xFF;
-      T.lock = (t[2] & 1) === 0 ? 'locked' : 'unlocked';   // t[2] : 0 = verrouillée, 1 = ouverte
+      // t[2] n'est l'état du verrouillage QUE sur un firmware Laufbursche (build > 0).
+      // Sur un firmware d'usine, c'est un octet non documenté : on ne l'interprète pas.
+      T.lockByte = t[2] & 0xFF;
+      T.lock = (T.fwBuild > 0) ? ((t[2] & 1) === 0 ? 'locked' : 'unlocked') : null;
       const r = t[4] & 0xFF;
       const b1 = (r >> 1) & 1, b2 = (r >> 2) & 1;
       c.cruise = (b2 << 1) | b1;
@@ -1096,12 +1170,9 @@ const TEV = (() => {
           out.push({ kind: 'bad', title: ERROR_NAMES[code] || ('Code BMS ' + code), sub: 'BMS · niveau ' + sev });
         });
       }
-      const bit = (b, i) => b != null && ((b >> i) & 1) === 1;
-      if (bit(T.ecu1, 0)) out.push({ kind: 'bad', title: 'Erreur de frein', sub: 'Contrôleur · statut 1, bit 0' });
-      if (bit(T.ecu1, 3)) out.push({ kind: 'bad', title: 'Avertissement contrôleur', sub: 'Contrôleur · statut 1, bit 3' });
-      if (bit(T.ecu1, 4)) out.push({ kind: 'bad', title: 'Avertissement contrôleur 2', sub: 'Contrôleur · statut 1, bit 4' });
-      if (bit(T.ecu1, 2)) out.push({ kind: 'caution', title: 'Avertissement feu arrière', sub: 'Contrôleur · statut 1, bit 2' });
-      if (bit(T.ecu1, 7) || bit(T.ecu2, 7)) out.push({ kind: 'info', title: 'Mode parking (P)', sub: 'Parking actif' });
+      // NOTE (capture réelle 23/11) : sur ce modèle, 55 72 t[10..11] valent 00 et 88 en permanence,
+      // scooters à l'arrêt. La lecture « bit 7 = mode parking » du code de référence produirait donc
+      // une alerte permanente et fausse. Ces octets sont affichés en diagnostic, pas interprétés.
       return out;
     }
   }
@@ -1336,6 +1407,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     }
     $('sheet').classList.remove('on');
     S.parser.reset(); S.hist.length = 0; S.frames = 0; S.crcFail = 0;
+    S.tempSig = undefined; S.tempSeen = 0; S.tempVaried = false;
     S.transport = makeTransport();
     setStatus('connecting');
     try {
@@ -1357,6 +1429,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
   function startDemo() {
     if (S.demo) return;
     S.parser.reset(); S.hist.length = 0; S.frames = 0; S.crcFail = 0;
+    S.tempSig = undefined; S.tempSeen = 0; S.tempVaried = false;
     $('sheet').classList.remove('on');
     logLine('ok', 'mode démo : trames synthétiques valides (CRC réel), aucun accès radio');
     setStatus('demo');
@@ -1380,7 +1453,8 @@ if (typeof window !== 'undefined') window.TEV = TEV;
       const dt = (now - S.lastT) / 3600000;
       // pas de tension mesurée : on estime avec la tension nominale configurée (55 71)
       const vNom = T.cfg.packVolt || 60;
-      const iMot = T.have72 ? (T.fMotorCurrent + T.rMotorCurrent) : null;
+      const iMot = (T.fMotorCurrent !== null && T.rMotorCurrent !== null)
+        ? (T.fMotorCurrent + T.rMotorCurrent) : null;
       const p = T.have52 ? (T.volt * T.current) : (iMot !== null ? vNom * iMot : null);
       if (Number.isFinite(p) && p > 0) S.energyAcc += p * dt;
     }
@@ -1431,16 +1505,23 @@ if (typeof window !== 'undefined') window.TEV = TEV;
 
     /* — badges — */
     setBadge('b-gear', 'Vitesse', T.have71 ? String(T.gear) : null);
-    setBadge('b-lock', 'Sperre', T.lock === null || T.lock === undefined ? null : (T.lock === 'locked' ? 'lock' : 'open'));
+    if (T.lock) setBadge('b-lock', 'Sperre', T.lock === 'locked' ? 'lock' : 'open');
+    else {
+      const el = $('b-lock');
+      el.innerHTML = 'Verrouillage <b>non transmis</b>';
+      el.classList.remove('ok', 'warn', 'bad');
+    }
     setBadge('b-mode', 'Moteur', T.have72 ? (T.doubleMotor ? '2×' : '1×') : null);
 
     /* — mesures instantanées —
        Sans BMS : ni tension pack ni courant batterie ne sont transmis. On ne les fabrique pas.
        Seuls les courants/températures des deux moteurs existent (trame 55 72).                  */
-    const volt = T.have52 ? T.volt : null;
-    const cur = T.have52 ? T.current : null;
+    // on n'expose jamais une valeur que le parseur a jugée impossible
+    const volt = (T.have52 && T.volt > 0) ? T.volt : null;
+    const cur = (T.have52 && T.current !== null) ? T.current : null;
     const pwr = (volt !== null && cur !== null) ? volt * cur : null;
-    const motorA = T.have72 ? (T.fMotorCurrent + T.rMotorCurrent) : null;   // somme des deux contrôleurs
+    const motorA = (T.fMotorCurrent !== null && T.rMotorCurrent !== null)
+      ? (T.fMotorCurrent + T.rMotorCurrent) : null;   // somme des deux contrôleurs
     const pwrMot = (motorA !== null && volt !== null) ? motorA * volt : null;
     if (T.have52) {
       setMetric('m-volt', volt, 1, 'V', 'pack');
@@ -1467,8 +1548,8 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     setMetric('m-range', consoR, 1, 'Wh/km', consoR === null ? 'selon conso moy.' : 'session');
 
     /* — moteurs — */
-    setMetric('m-ri', T.have72 ? T.rMotorCurrent : null, 1, 'A');
-    setMetric('m-fi', T.have72 ? T.fMotorCurrent : null, 1, 'A');
+    setMetric('m-ri', T.rMotorCurrent, 1, 'A');
+    setMetric('m-fi', T.fMotorCurrent, 1, 'A');
     $('m-rt').textContent = T.rMotorTemp > 0 ? 'temp. ' + T.rMotorTemp + ' °C' : 'temp. –';
     $('m-ft').textContent = T.fMotorTemp > 0 ? 'temp. ' + T.fMotorTemp + ' °C' : 'temp. –';
 
@@ -1477,11 +1558,25 @@ if (typeof window !== 'undefined') window.TEV = TEV;
        On n'affiche donc un niveau / une tension QUE si le BMS existe vraiment.               */
     const hasBms = T.have52 || T.have53 || T.cellMv.some((x) => x > 0);
     $('bat-soc-card').hidden = !T.have52;
-    $('card-cells').hidden = !hasBms;
-    $('card-bms').hidden = !hasBms;
-    $('nobms').style.display = T.have52 ? 'none' : '';
+    const hasCells = T.cellMv.some((x) => x > 0);
+    $('card-cells').hidden = !hasCells;         // pas de données cellules = pas de carte vide
+    $('card-bms').hidden = !hasCells;
+    // trois états distincts : BMS exploitable / trame reçue mais incohérente / aucune trame
+    const stBms = T.have52 ? 'ok' : (T.bmsInvalid ? 'incoherent' : 'absent');
+    $('nobms').style.display = (stBms === 'ok') ? 'none' : '';
+    if (stBms === 'incoherent') {
+      $('nobms').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>'
+        + "<div><b>Trame batterie reçue, mais inutilisable.</b> Ta machine émet bien <span class=\"num\">55 52</span> "
+        + "(contrairement à ce que je supposais), mais elle arrive avec des octets de remplissage : tension 0,00 V, "
+        + "courant sentinelle, SOC et SOH identiques. Rien d'exploitable, donc rien à afficher. "
+        + 'Envoie-moi une capture <b>en roulage, batterie chargée</b> : si la tension devient cohérente, je décode cette trame.</div>';
+    }
     if (hasBms) S.bmsSeen = true;
 
+    // 78 % (= 0x4E) immobile, hors charge, sur toutes les trames : valeur sentinelle probable,
+    // le BMS n'existant pas. On l'affiche mais on le signale, sans l'inventer.
+    const socSuspect = T.have52 && T.soc === 78;
+    T.socSuspect = socSuspect;
     if (T.have52) {
       $('soc').innerHTML = Math.round(T.soc) + '<small>%</small>';
       const bar = $('socbar');
@@ -1489,7 +1584,8 @@ if (typeof window !== 'undefined') window.TEV = TEV;
       bar.classList.toggle('low', T.soc < 25);
       bar.classList.toggle('crit', T.soc < 10);
       $('soc-v').textContent = fmt(T.volt, 1) + ' V';
-      $('soc-soh').textContent = 'SOH ' + T.soh + ' %';
+      $('soc-soh').textContent = socSuspect ? 'valeur sentinelle ?' : 'SOH ' + T.soh + ' %';
+      $('soc-soh').style.color = socSuspect ? 'var(--warn)' : '';
       setMetric('b-volt', T.volt, 1, 'V');
       setMetric('b-cur', T.current, 1, 'A');
       setMetric('b-pwr', T.volt * T.current, 0, 'W');
@@ -1508,8 +1604,17 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     $('rtag2').textContent = T.have73 ? '55 73' : '–';
 
     $('soc-soh').textContent = T.have52 ? 'SOH ' + T.soh + ' %' : '';
+    renderBatTemps(T);
     $('b-tmax').innerHTML = tempHtml(T.maxCellTemp);
     $('b-tmin').innerHTML = tempHtml(T.minCellTemp);
+    if (T.have52 && T.socSuspect) {
+      const hint = document.querySelector('#bat-soc-card .hint') || document.createElement('p');
+      hint.className = 'hint';
+      hint.innerHTML = 'SOC et SOH identiques (78 %) et figés : très probablement des octets de remplissage, ' +
+        'pas une mesure. Aucune tension cohérente n\'accompagne la trame <span class="num">55 52</span>. ' +
+        'À traiter comme « pas de BMS », pas comme 78 %.';
+      $('bat-soc-card').appendChild(hint);
+    }
     setRow('b-soh', T.have52 ? T.soh + ' %' : null);
     setRow('b-cap', T.have53 && T.capacity > 0 ? T.capacity + ' <small>Ah bruts</small>' : null);
     setRow('b-cycles', T.have53 && T.chargeCounter > 0 ? String(T.chargeCounter) : null);
@@ -1539,7 +1644,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     renderErrors();
 
     /* — identité / config — */
-    setRow('s-fin', T.fin || (S.transport && S.transport.deviceName) || null);
+    setRow('s-fin', T.fin || null);
     setRow('s-sw', T.swVer || null);
     setRow('s-hw', T.hwVer || null);
     setRow('s-build', T.fwBuild ? String(T.fwBuild) : null);
@@ -1551,11 +1656,11 @@ if (typeof window !== 'undefined') window.TEV = TEV;
 
     const c = T.cfg;
     setRow('s-wheel', T.have71 ? fmt(c.wheel, 1) + '″ <small>(' + fmt(c.wheel * 25.4, 0) + ' mm)</small>' : null);
-    setRow('s-poles', T.have71 && c.poles ? String(c.poles) : null);
+    setRow('s-poles', T.have71 && c.poles ? String(c.poles) + ' <small>(champ t[5], signification à confirmer)</small>' : null);
     setRow('s-asl', T.have71 ? c.assistSpeedLimit + ' <small>km/h</small>' : null);
     setRow('s-spl', T.have71 ? c.speedLimit + ' <small>km/h</small>' : null);
-    setRow('s-pack', T.have71 && c.packVolt ? c.packVolt + ' <small>V</small>' : null);
-    setRow('s-protemp', T.have71 ? c.sysProTemp + ' <small>°C</small>' : null);
+    setRow('s-pack', T.have71 && c.packVolt ? c.packVolt + ' <small>V — à confirmer en roulage</small>' : null);
+    setRow('s-protemp', T.have71 ? c.sysProTemp + ' <small>°C — seuil de protection, pas une mesure</small>' : null);
     setRow('s-start', T.have71 ? (c.startMode ? 'kickstart' : 'départ arrêté') : null);
     setRow('s-abs', T.have71 ? (c.abs ? 'eABS actif · niveau ' + ((S.parser.T.gearCache[T.gear] || {}).eabsLevel ?? '–') : 'inactif') : null);
     setRow('s-cruise', T.have71 ? (c.cruise === 2 ? 'manuel' : c.cruise === 1 ? 'auto' : 'désactivé') : null);
@@ -1565,6 +1670,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     setRow('s-lockbat', T.have73 ? [T.batLock ? 'batterie verrouillée' : null, T.gpsLock ? 'GPS verrouillé' : null].filter(Boolean).join(' · ') || 'aucun' : null);
 
     renderGears();
+    renderFrameDiag();
     drawTrace();
     renderStats();
   }
@@ -1659,6 +1765,106 @@ if (typeof window !== 'undefined') window.TEV = TEV;
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 3.5h.01"/><path d="M10.3 3.9L2.6 17a2 2 0 001.7 3h15.4a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
         <div><div class="tt">${escapeHtml(e.title)}</div><div class="ss">${escapeHtml(e.sub)}</div></div>
       </div>`).join('');
+  }
+
+  /* ───────────── températures batterie (55 52 t[10..16]) ─────────────
+     Source unique : la trame 55 52. Sur les machines à smart BMS, ces 7 octets sont
+     7 sondes du pack avec un offset de −40 °C. Sur ta capture, seules 2 portent une
+     valeur plausible, et elles sont constantes → à confirmer, pas à afficher comme une mesure. */
+  const BAT_TEMP_LABELS = ['Élément 0', 'Élément 1', 'Élément 2', 'MOS 0', 'MOS 1', 'Carte BMS 0', 'Carte BMS 1'];
+  function renderBatTemps(T) {
+    const host = $('battemps');
+    if (!host) return;
+    const arr = T.batTemp || [];
+    const valid = arr.filter((x) => x.valid);
+    const tag = $('battemp-tag');
+
+    if (!arr.length) {
+      tag.textContent = '55 52';
+      host.innerHTML = '<div class="empty" style="color:var(--dim2)">Aucune trame <span class="num">55 52</span> reçue pour l\'instant.</div>';
+      return;
+    }
+
+    // figé = la signature n'a jamais changé depuis le début de la session (>= 3 trames vues)
+    const sig = valid.map((x) => x.raw).join(',');
+    if (S.tempSig === undefined) { S.tempSig = sig; S.tempSeen = 1; S.tempVaried = false; }
+    else {
+      S.tempSeen++;
+      if (sig !== S.tempSig) { S.tempVaried = true; S.tempSig = sig; }
+    }
+    const frozen = valid.length > 0 && S.tempSeen >= 3 && !S.tempVaried;
+
+    const rows = arr.map((x, i) => {
+      const ok = x.valid;
+      const shown = ok ? x.c + ' °C' : '—';
+      const why = !ok
+        ? (x.raw === 0 ? 'capteur absent (0x00)' : 'octet inexploitable')
+        : (frozen ? 'figée sur cette session' : 'plausible');
+      return `<div class="kv">
+        <span class="k">${BAT_TEMP_LABELS[i]}</span>
+        <span class="v" style="color:${ok ? (frozen ? 'var(--warn)' : 'var(--ink)') : 'var(--dim2)'}">${shown}</span>
+      </div>
+      <div style="font-size:10.5px;color:var(--dim2);margin:-5px 0 7px">${why} · octet ${x.raw.toString(16).toUpperCase().padStart(2, '0')}</div>`;
+    }).join('');
+
+    const badge = valid.length
+      ? (frozen ? 'à confirmer' : valid.length + '/7 plausibles')
+      : 'aucune mesure';
+    tag.textContent = badge;
+    tag.style.color = valid.length ? (frozen ? 'var(--warn)' : 'var(--accent)') : 'var(--dim2)';
+    tag.style.borderColor = valid.length ? (frozen ? 'rgba(255,176,32,.35)' : 'rgba(53,224,176,.35)') : '';
+
+    host.innerHTML = rows + (valid.length
+      ? `<p class="hint">${frozen
+          ? 'Ces valeurs ne bougent sur aucune trame de la session : soit le capteur n\'est pas interrogé, soit ce sont des octets de remplissage. Rouler et recharger permettra de trancher.'
+          : 'Valeurs plausibles, décodées avec l\'offset de −40 °C du protocole.'}</p>`
+      : `<p class="hint">Aucune des 7 sondes ne renvoie de valeur exploitable : la trame existe mais ne transporte pas de mesure de température.</p>`);
+  }
+
+  /* ───────────── diagnostic des trames ───────────── */
+  // ce que chaque trame apporte réellement, et ce qui reste inexploité
+  const FRAME_DOC = {
+    '55 41': ['Code batterie', 'non émis sur cette machine (capture : absent)'],
+    '55 42': ['FIN / numéro de série', 'présent mais entièrement à zéro sur ta machine'],
+    '55 43': ['Version logicielle / matérielle', 'exploité'],
+    '55 44': ['Firmware afficheur / batterie / éclairage', 'absent de la capture'],
+    '55 45': ['Firmware des contrôleurs', 'absent de la capture'],
+    '55 51': ['Tensions cellules 1-8', 'absence confirmée (pas de BMS)'],
+    '55 52': ['Batterie (tension, courant, SOC)', 'trame reçue mais sans valeurs cohérentes'],
+    '55 53': ['Capacité / équilibrage', 'absence confirmée'],
+    '55 54': ['Alertes BMS', 'absent de la capture'],
+    '55 55': ['Tensions cellules 9-16', 'absence confirmée'],
+    '55 56': ['Tensions cellules 17-24', 'absence confirmée'],
+    '55 71': ['Paramètres contrôleur', 'exploité'],
+    '55 72': ['Courants / températures moteurs, vitesse', 'partiellement exploité — vitesse à confirmer en roulage'],
+    '55 73': ['Trajet, odomètre, régénération', 'partiellement exploité — octets 13 et 15 inexploités'],
+    '55 79': ['Statut 2e essieu (Tetra)', 'non émis sur une Fighter'],
+    '55 7A': ['Moteur 2e essieu (Tetra)', 'non émis sur une Fighter'],
+  };
+  function renderFrameDiag() {
+    const T = S.parser.T, host = $('framelist');
+    const keys = Object.keys(T.byFrame || {});
+    if (!keys.length) {
+      host.innerHTML = '<div class="empty" style="color:var(--dim2)">Aucune trame reçue pour l\'instant.</div>';
+      return;
+    }
+    const seen = new Set(keys);
+    const rows = keys.sort().map((k) => {
+      const [what, status] = FRAME_DOC[k] || ['Trame inconnue', 'à décoder'];
+      const bad = /absent|zéro|incohérent|partiel/i.test(status);
+      return `<div class="kv">
+        <span class="k"><span class="num" style="color:${bad ? 'var(--warn)' : 'var(--accent)'}">${k}</span> · ${what}</span>
+        <span class="v" style="font-weight:600;font-size:11.5px;color:${bad ? 'var(--warn)' : 'var(--dim)'}">${T.byFrame[k]}×</span>
+      </div>
+      <div style="font-size:11px;color:var(--dim2);margin:-4px 0 6px">${status}</div>`;
+    }).join('');
+    const absent = Object.keys(FRAME_DOC).filter((k) => !seen.has(k) && /BMS|cellules/i.test(FRAME_DOC[k][0]));
+    host.innerHTML = rows + (absent.length
+      ? `<div style="font-size:11px;color:var(--dim2);margin-top:8px">Jamais reçues et attendues sur une machine sans BMS :
+         <span class="num">${absent.join('</span>, <span class="num">')}</span>.</div>` : '');
+    const B = T.lastBytes;
+    $('lastframe').textContent = B ? B.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ') : '–';
+    $('unknown-bytes').textContent = '55 72 : t[7..8] et t[15..16]\n55 73 : t[13] et t[15]\n55 71 : t[2]';
   }
 
   /* ───────────── limites par vitesse ───────────── */
@@ -1882,5 +2088,5 @@ if (typeof window !== 'undefined') window.TEV = TEV;
 })();
 
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f11e7f0bc38e31',t:'MTc5NTQ0NjgxOQ=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f11e7f0bc38e31',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f16626dfc1e279',t:'MTc5NTQ0OTc1NA=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f16626dfc1e279',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
