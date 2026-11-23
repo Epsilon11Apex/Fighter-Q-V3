@@ -415,12 +415,23 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
     </div>
 
     <div class="card">
-      <div class="card-h"><span class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.8V5a2 2 0 10-4 0v9.8a4 4 0 104 0z"/></svg>Températures batterie</span><span class="tag" id="battemp-tag">55 52</span></div>
-      <div id="battemps"><div class="empty" style="color:var(--dim2)">Aucune trame <span class="num">55 52</span> reçue pour l'instant.</div></div>
+      <div class="card-h"><span class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.8V5a2 2 0 10-4 0v9.8a4 4 0 104 0z"/></svg>Température batterie</span><span class="tag" style="color:var(--warn);border-color:rgba(255,176,32,.35)">non transmise</span></div>
+      <div class="empty" style="color:var(--dim);align-items:flex-start">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--warn);margin-top:2px"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+        <div>
+          <b style="color:var(--ink)">Cette machine ne transmet aucune température de batterie exploitable.</b><br>
+          Les octets <span class="num">55 52</span> t[8..11] contiennent la <b>même valeur répétée quatre fois</b>
+          (vérifié sur 88 trames et trois sessions : 78, 86-88, puis 100). Ce n'est pas une température :
+          100 donnerait 60 °C, impossible un 23 novembre à 21 h.
+        </div>
+      </div>
+      <div class="diag-block" style="margin-top:12px">
+        <span class="lbl">Octets batterie reçus (valeur unique)</span>
+        <code id="batraw">–</code>
+      </div>
       <p class="hint">
-        Les 7 sondes du pack sont en <span class="num">55 52</span> t[10..16], avec un offset de −40 °C.
-        Ce sont les <b>seules</b> températures de batterie du protocole : sans smart BMS, il n'en existe pas d'autre.
-        Les températures que la page affiche par ailleurs (moteurs) viennent de <span class="num">55 72</span>.
+        Pour obtenir une température de batterie, il faudrait un capteur relié au contrôleur — ce qui n'est pas
+        le cas ici. Je préfère te le dire clairement plutôt que d'afficher un chiffre qui n'en est pas un.
       </p>
     </div>
 
@@ -1010,7 +1021,7 @@ const TEV = (() => {
         have52: false, have53: false, have71: false, have72: false, have73: false,
         lock: null, soh: 0, poleVolt: 0, maxCellTemp: null, minCellTemp: null,
         cellMv: new Array(CELL_SLOTS).fill(0), cellCount: 0,
-        batTemp: [], haveCurrent: false, batTempMin: [], batTempMax: [], batTempN: [],
+        haveCurrent: false, batQuad: null,
         capacity: 0, chargeCounter: 0, maxCellV: 0, minCellV: 0, balance: 0,
         errors: null, ecu1: null, ecu2: null, doubleMotor: false,
         fMotorCurrent: 0, rMotorCurrent: 0, fMotorTemp: 0, rMotorTemp: 0,
@@ -1046,32 +1057,14 @@ const TEV = (() => {
           T.raw52 = t.slice();
           const rawV = u16(t, 2);
           const v = u16(t, 2) * 0.1;
-          // On conserve les températures même si la tension est inexploitable :
-          // c'est un diagnostic séparé, et c'est justement ce qui nous intéresse ici.
-          T.batTemp = [];
-          for (let i = 0; i < 7; i++) {
-            const raw = t[10 + i] & 0xFF;
-            const c = raw - 40;
-            const ok = raw !== 0 && SANE.temp(c);
-            T.batTemp.push({ raw, c, valid: ok });
-            // suivi de plage sur TOUTES les trames (pas seulement à l'affichage)
-            if (ok) {
-              if (T.batTempMin[i] === undefined) { T.batTempMin[i] = c; T.batTempMax[i] = c; T.batTempN[i] = 1; }
-              else { T.batTempMin[i] = Math.min(T.batTempMin[i], c); T.batTempMax[i] = Math.max(T.batTempMax[i], c); T.batTempN[i]++; }
-            }
-          }
+          // Aucune température batterie n'est dérivée : sur 88 trames et 3 sessions, t[8..11]
+          // portent toujours la même valeur répétée 4×. Ce n'est pas une mesure. On garde le brut.
+          T.batQuad = [t[8] & 0xFF, t[9] & 0xFF, t[10] & 0xFF, t[11] & 0xFF];
           if (!SANE.volt(v)) { T.bmsInvalid = (T.bmsInvalid || 0) + 1; break; }
           const a = u16(t, 6) * 0.1 - 1000;            // négatif = régénération
           const tMax = (t[17] & 0xFF) - 40, tMin = (t[18] & 0xFF) - 40;
           T.volt = v;
           T.poleVolt = u16(t, 4) * 0.1;
-          // 55 52 t[10..16] : 7 sondes du pack (cellule 0-2, MOS 0-1, carte BMS 0-1),
-          // décodées avec un offset de -40 °C comme dans FrameParser.java (batTemp[]).
-          T.batTemp = [];
-          for (let i = 0; i < 7; i++) {
-            const raw = t[10 + i] & 0xFF;
-            T.batTemp.push({ raw, c: raw - 40, valid: raw !== 0 && SANE.temp(raw - 40) });
-          }
           // haveCurrent : si t[6..7] = 0, le courant n'est pas transmis (cas Blade Mini).
           T.haveCurrent = u16(t, 6) !== 0;
           T.current = (T.haveCurrent && SANE.amp(a)) ? a : null;
@@ -1449,7 +1442,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
         + ' trip=' + (T.have73 ? fmt1(T.trip) : '-')
         + ' T_av=' + (T.fMotorTemp || 0)
         + ' T_ar=' + (T.rMotorTemp || 0)
-        + ' T_bat=' + (T.batTemp || []).map((x) => (x.valid ? x.c : '-')).join(','), 0);
+        + ' bat52=' + (T.raw52 ? T.raw52.slice(8, 12).map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(',') : '-'), 0);
     }
   }
   function recStart() {
@@ -1666,7 +1659,7 @@ if (typeof window !== 'undefined') window.TEV = TEV;
         ' amp=' + (T.current !== null ? T.current.toFixed(1) : '-') +
         ' odo=' + (T.have73 ? T.odometer : '-') +
         ' mT=' + (T.fMotorTemp || 0) + '/' + (T.rMotorTemp || 0) +
-        ' bT=' + (T.batTemp || []).map((x) => x.valid ? x.c : '-').join(','), 20);
+        ' t72_12_14=' + (T.lastBytes ? [T.lastBytes[12], T.lastBytes[13], T.lastBytes[14]].join(',') : '-'), 20);
     }
     if (S.transport) S.transport._confirmLink();
     if (!S.pending) { S.pending = true; requestAnimationFrame(() => { S.pending = false; render(); }); }
@@ -1758,13 +1751,10 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     const stBms = T.have52 ? 'ok' : (T.bmsInvalid ? 'incoherent' : 'absent');
     $('nobms').style.display = (stBms === 'ok') ? 'none' : '';
     if (stBms === 'incoherent') {
-      const nValid = (T.batTemp || []).filter((x) => x.valid).length;
       $('nobms').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>'
-        + '<div><b>Tension et courant batterie non transmis.</b> Ta machine émet bien '
-        + '<span class="num">55 52</span>, mais les octets de tension et de courant restent à zéro : '
-        + "il n'y a pas de mesure d'énergie à afficher, et le SOC/SOH sont des valeurs de remplissage."
-        + (nValid ? '<br><br><b>Mais ' + nValid + ' sonde(s) de température batterie sont réelles</b> — voir la carte « Températures batterie » plus bas.'
-                  : '') + '</div>';
+        + '<div><b>Aucune mesure de batterie n\'est transmise.</b> La trame <span class="num">55 52</span> arrive bien, '
+        + 'mais tension et courant restent à zéro, et les quatre octets de niveau contiennent la même valeur. '
+        + 'Rien de mesurable : ni charge, ni température.</div>';
     }
     if (hasBms) S.bmsSeen = true;
 
@@ -1962,59 +1952,21 @@ if (typeof window !== 'undefined') window.TEV = TEV;
       </div>`).join('');
   }
 
-  /* ───────────── températures batterie (55 52 t[10..16]) ─────────────
-     Source unique : la trame 55 52. Sur les machines à smart BMS, ces 7 octets sont
-     7 sondes du pack avec un offset de −40 °C. Sur ta capture, seules 2 portent une
-     valeur plausible, et elles sont constantes → à confirmer, pas à afficher comme une mesure. */
-  const BAT_TEMP_LABELS = ['Élément 0', 'Élément 1', 'Élément 2', 'MOS 0', 'MOS 1', 'Carte BMS 0', 'Carte BMS 1'];
+  /* ───────────── octets batterie de 55 52 ─────────────
+     Vérifié sur 88 trames / 3 sessions : t[8], t[9], t[10] et t[11] portent TOUJOURS
+     la même valeur (78, puis 86-88, puis 100). Ce n'est donc pas sept sondes distinctes,
+     et ce n'est pas une température (100 → 60 °C, impossible en novembre à 21 h).
+     On affiche le brut, sans interprétation. */
   function renderBatTemps(T) {
-    const host = $('battemps');
-    if (!host) return;
-    const arr = T.batTemp || [];
-    const valid = arr.filter((x) => x.valid);
-    const tag = $('battemp-tag');
-
-    if (!arr.length) {
-      tag.textContent = '55 52';
-      host.innerHTML = '<div class="empty" style="color:var(--dim2)">Aucune trame <span class="num">55 52</span> reçue pour l\'instant.</div>';
-      return;
-    }
-
-    // Une sonde est « vivante » si sa valeur a bougé au moins une fois pendant la session.
-    const ranges = arr.map((x, i) => (x.valid && T.batTempN[i] > 1)
-      ? { min: T.batTempMin[i], max: T.batTempMax[i], varied: T.batTempMax[i] !== T.batTempMin[i] }
-      : null);
-    const live = ranges.filter((r) => r && r.varied).length;
-    const frozen = valid.length > 0 && live === 0 && S.parser.T.frames > 20;
-
-    const rows = arr.map((x, i) => {
-      const ok = x.valid;
-      const r = ranges[i];
-      const shown = ok ? x.c + ' °C' : '—';
-      const why = !ok
-        ? (x.raw === 0 ? 'capteur absent (0x00)' : 'octet inexploitable')
-        : (r && r.varied ? 'mesure vivante · ' + r.min + ' → ' + r.max + ' °C sur la session'
-                        : (r ? 'valeur fixe · ' + r.min + ' °C' : 'plausible'));
-      return `<div class="kv">
-        <span class="k">${BAT_TEMP_LABELS[i]}</span>
-        <span class="v" style="color:${ok ? (frozen ? 'var(--warn)' : 'var(--ink)') : 'var(--dim2)'}">${shown}</span>
-      </div>
-      <div style="font-size:10.5px;color:var(--dim2);margin:-5px 0 7px">${why} · octet ${x.raw.toString(16).toUpperCase().padStart(2, '0')}</div>`;
-    }).join('');
-
-    const badge = valid.length
-      ? (frozen ? 'figée — à confirmer' : 'réelle · ' + valid.length + '/7 sondes')
-      : 'aucune mesure';
-    tag.textContent = badge;
-    tag.style.color = valid.length ? (frozen ? 'var(--warn)' : 'var(--accent)') : 'var(--dim2)';
-    tag.style.borderColor = valid.length ? (frozen ? 'rgba(255,176,32,.35)' : 'rgba(53,224,176,.35)') : '';
-
-    host.innerHTML = rows + (valid.length
-      ? `<p class="hint">${frozen
-          ? 'Ces valeurs ne bougent sur aucune trame de la session : soit le capteur n\'est pas interrogé, soit ce sont des octets de remplissage. Rouler et recharger permettra de trancher.'
-          : 'Ces sondes bougent pendant la session : ce sont de vraies mesures. Deux sondes fiables sur sept, ' +
-            'c\'est peu, mais c\'est réel — et c\'est la seule température de batterie que cette machine transmet.'}</p>`
-      : `<p class="hint">Aucune des 7 sondes ne renvoie de valeur exploitable : la trame existe mais ne transporte pas de mesure de température.</p>`);
+    const el = $('batraw');
+    if (!el) return;
+    const b = T.raw52;
+    if (!b) { el.textContent = '– (aucune trame 55 52 reçue)'; return; }
+    const hex = (i) => b[i].toString(16).toUpperCase().padStart(2, '0');
+    const same = b[8] === b[9] && b[9] === b[10] && b[10] === b[11];
+    el.textContent = 't8=' + hex(8) + '  t9=' + hex(9) + '  t10=' + hex(10) + '  t11=' + hex(11)
+      + '  (' + b[8] + ', ' + b[9] + ', ' + b[10] + ', ' + b[11] + ')'
+      + (same ? '  → valeur unique répétée' : '  → valeurs divergentes');
   }
 
   /* ───────────── diagnostic des trames ───────────── */
@@ -2294,5 +2246,5 @@ if (typeof window !== 'undefined') window.TEV = TEV;
 })();
 
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f198f29809e1a8',t:'MTc5NTQ1MTgzNQ=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f198f29809e1a8',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f2fcd249cce1cc',t:'MTc5NTQ2NjQxMQ=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f2fcd249cce1cc',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
