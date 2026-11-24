@@ -320,7 +320,7 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
         <div class="metric"><div class="k">Odomètre</div><div class="val" id="m-odo">–<small>km</small></div></div>
         <div class="metric"><div class="k">Vitesse moy.</div><div class="val" id="m-avg">–<small>km/h</small></div></div>
         <div class="metric"><div class="k">Vitesse max</div><div class="val" id="m-max">–<small>km/h</small></div></div>
-        <div class="metric regen"><div class="k">Régénération</div><div class="val" id="m-regen">–<small>Wh</small></div></div>
+        <div class="metric regen"><div class="k">Régénération</div><div class="val" id="m-regen">–<small>Wh</small></div><div class="foot">compteur contrôleur</div></div>
         <div class="metric"><div class="k">Conso. moy.</div><div class="val" id="m-range">–<small>Wh/km</small></div><div class="foot">session</div></div>
       </div>
     </div>
@@ -374,15 +374,21 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
     <div class="card">
       <div class="card-h"><span class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l5-6 4 3 4-6 5 5"/></svg>Énergie & régénération</span><span class="tag" id="rtag2">55 73</span></div>
       <div class="grid g2">
-        <div class="metric"><div class="k">Régénération</div><div class="val" id="b-regen">–<small>Wh</small></div><div class="foot">compteur contrôleur</div></div>
+        <div class="metric"><div class="k">Régénération</div><div class="val" id="b-regen">–<small>Wh</small></div><div class="foot" id="b-regen-foot">compteur contrôleur</div></div>
         <div class="metric"><div class="k">Trajet</div><div class="val" id="b-trip">–<small>km</small></div><div class="foot">depuis la remise à zéro</div></div>
         <div class="metric"><div class="k">Odomètre</div><div class="val" id="b-odo">–<small>km</small></div><div class="foot">total machine</div></div>
         <div class="metric"><div class="k">Conso. estimée</div><div class="val" id="b-conso">–<small>Wh/km</small></div><div class="foot" id="b-consof">sommation moteurs</div></div>
       </div>
-      <p class="hint">
+      <p class="hint" id="regen-note">
         La consommation est <b>estimée</b> : courants moteurs (<span class="num">55 72</span>) × tension nominale
         configurée (<span class="num">55 71</span>), intégrés dans le temps. Ce n'est pas une mesure : la tension réelle
-        n'est pas transmise. La régénération, elle, vient du compteur du contrôleur.
+        n'est pas transmise. La régénération, elle, vient du compteur du contrôleur (<span class="num">55 73</span>).
+      </p>
+      <p class="hint" id="regen-truth" hidden>
+        <b>Ce compteur régénération reste à 0,0 Wh.</b> Vérifié sur une capture de 8 min avec 28 freinages réels
+        (vitesse jusqu'à 53 km/h) : <span class="num">55 73</span> t[11..12] n'a jamais dépassé 0, et le courant moteur
+        (<span class="num">55 72</span>) ne devient jamais négatif pendant un freinage — il chute à 0.
+        Sur cette machine, la régénération n'est donc ni comptée ni détectable via ce protocole.
       </p>
     </div>
 
@@ -1914,7 +1920,8 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     setMetric('m-odo', T.have73 ? T.odometer : null, 0, 'km');
     setMetric('m-avg', T.have73 ? T.avgSpeed : null, 1, 'km/h');
     setMetric('m-max', T.have73 ? T.maxSpeed : null, 1, 'km/h');
-    setMetric('m-regen', T.have73 ? T.energyFb : null, 1, 'Wh');
+    setMetric('m-regen', T.have73 ? T.energyFb : null, 1, 'Wh',
+      (T.have73 && T.energyFb === 0) ? 'figé à 0 Wh — voir note' : 'compteur contrôleur');
     const km = T.have73 ? T.trip : 0;
     const consoR = (km > 0.3 && S.energyAcc > 0.5) ? (S.energyAcc / km) : null;
     setMetric('m-range', consoR, 1, 'Wh/km', consoR === null ? 'selon conso moy.' : 'session');
@@ -1964,7 +1971,17 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     }
 
     // énergie / roulage (trame 55 73 du contrôleur)
-    setMetric('b-regen', T.have73 ? T.energyFb : null, 1, 'Wh');
+    setMetric('b-regen', T.have73 ? T.energyFb : null, 1, 'Wh',
+      (T.have73 && T.energyFb === 0) ? 'figé à 0 Wh — voir note' : 'compteur contrôleur');
+    /* note de vérité sur la régénération : on l'affiche quand la session a assez de données
+       (plusieurs trames reçues) et que le compteur reste à 0. C'est un fait observable, pas une
+       supposition — la capture du 24/11 (8 min, 28 freinages) l'a établi. */
+    const regenNote = $('regen-truth');
+    if (regenNote) {
+      const regenSeen = T.have73 && S.frames > 30;
+      regenNote.hidden = !(regenSeen && T.energyFb === 0);
+      $('regen-note').hidden = !regenNote.hidden;
+    }
     setMetric('b-trip', T.have73 ? T.trip : null, 1, 'km');
     setMetric('b-odo', T.have73 ? T.odometer : null, 0, 'km');
     // conso estimée : somme des courants moteurs × tension nominale configurée
