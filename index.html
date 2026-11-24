@@ -426,9 +426,10 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--warn);margin-top:2px"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
         <div>
           <b style="color:var(--ink)">Cette machine ne transmet aucune température de batterie exploitable.</b><br>
-          Les octets <span class="num">55 52</span> t[8..11] contiennent la <b>même valeur répétée quatre fois</b>
-          (vérifié sur 88 trames et trois sessions : 78, 86-88, puis 100). Ce n'est pas une température :
-          100 donnerait 60 °C, impossible un 23 novembre à 21 h.
+          Les octets <span class="num">55 52</span> t[8..11] contiennent la <b>même valeur répétée quatre fois</b>,
+          et cette valeur <b>suit la décharge de la batterie</b> (100 → 91 pendant une session de 8 min,
+          327 trames vérifiées). C'est un indicateur de niveau, pas une température : si c'en était une,
+          100 donnerait 60 °C, impossible un 24 novembre à 09 h.
         </div>
       </div>
       <div class="diag-block" style="margin-top:12px">
