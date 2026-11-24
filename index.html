@@ -378,6 +378,7 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
         <div class="metric"><div class="k">Trajet</div><div class="val" id="b-trip">–<small>km</small></div><div class="foot">depuis la remise à zéro</div></div>
         <div class="metric"><div class="k">Odomètre</div><div class="val" id="b-odo">–<small>km</small></div><div class="foot">total machine</div></div>
         <div class="metric"><div class="k">Conso. estimée</div><div class="val" id="b-conso">–<small>Wh/km</small></div><div class="foot" id="b-consof">sommation moteurs</div></div>
+        <div class="metric"><div class="k">Distance restante</div><div class="val" id="b-range">–<small>km</small></div><div class="foot" id="b-range-foot">estimée</div></div>
       </div>
       <p class="hint" id="regen-note">
         La consommation est <b>estimée</b> : courants moteurs (<span class="num">55 72</span>) × tension nominale
@@ -514,6 +515,17 @@ footer.foot a{color:#5a7180;text-decoration:none;border-bottom:1px dotted #3d4d5
       </p>
       <div class="kv"><span class="k">Keep-alive télémétrie</span><span class="v" id="ka-state">–</span></div>
       <div class="kv"><span class="k">Écritures effectuées</span><span class="v" id="wr-state">0</span></div>
+      <div class="kv"><span class="k">Signal verrou machine</span><span class="v na" id="ka-lock">–</span></div>
+      <p class="hint" style="margin-top:10px">
+        <b>Blocage moteur (type EyeX) : impossible sur ce protocole.</b> EyeX verrouille la trott en
+        émettant une commande lock spécifique. Le protocole Teverun <span class="num">Fighter Q</span> n'autorise
+        <b>qu'une seule trame en sortie</b> — le keep-alive. Il n'existe <b>aucune commande lock/unlock</b> à envoyer,
+        donc le contrôleur ne peut pas recevoir d'ordre de blocage moteur. Sur ta capture, le byte de verrou
+        (<span class="num">55 71</span> t[2]) est constant à 0 : il n'y a même pas de signal de verrou dynamique
+        à lire. Ce n'est pas une limite du code, mais une contrainte du protocole : pour verrouiller, il faudrait
+        le déverrouillage matériel ou l'app native qui parle un protocole plus riche. Je ne fabrique pas un
+        bouton « verrouiller » qui n'aurait aucun effet.
+      </p>
     </div>
   </section>
 
@@ -1346,7 +1358,7 @@ const TEV = (() => {
   }
 
   return {
-    crc8, connectCode, SELFTEST, Parser, Transport, Demo,
+    crc8, connectCode, SELFTEST, Parser, Transport, Demo, SANE,
     NAME_PREFIXES, ERROR_NAMES, CELL_SLOTS, ERROR_COUNT,
     ISSC_SERVICE, ISSC_NOTIFY, ISSC_WRITE, VENDOR_16BIT,
   };
@@ -1387,6 +1399,9 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     writes: 0,
     rateT: [],                // timestamps des trames (fenêtre 2 s)
     energyAcc: 0,             // Wh consommés (session)
+    rangeKm: null, rangeSrc: '', // estimation distance restante (km) + source
+    capWh: null,              // capacité pack estimée (Wh, auto-calibrée)
+    lvl0: null, lvlNow: null, // niveau batterie 55 52 t[8] : début / actuel
     vHist: [],                // {t, v} tension pour le tracé
     vMin: null, vMax: null,
     sag: null,                // chute de tension sous charge (V)
@@ -1838,6 +1853,36 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     }
     S.lastT2 = now;
 
+    /* — estimation distance restante (immunisée contre le voltage sag) ─────────────
+       On n'utilise PAS le voltage instantané (qui chute sous charge puis remonte : le « sag »).
+       On intègre l'énergie réelle consommée (Wh) sur la distance réelle (km), et on relie
+       cette énergie à la chute du niveau batterie (55 52 t[8], indicateur machine qui suit
+       la décharge) pour auto-calibrer la capacité du pack, puis en déduire les km restants.
+       Tous les intrants sont mesurés : level, distance, énergie. Le résultat est une estimation.
+       Sur cette machine, le voltage pack (t[2..3]) est à 0 : le parseur rejette la trame 55 52
+       avant de remplir T.soc. On lit donc le niveau brut t[8] via T.batQuad (capturé avant le
+       refus), avec un garde-fou 0..100. On l'utilise comme indicateur RELATIF de décharge,
+       jamais comme un SOC absolu affiché. */
+    const rawLvl = (T.batQuad && T.batQuad[0] !== undefined) ? T.batQuad[0] : null;
+    const lvl = (rawLvl !== null && TEV.SANE.pct(rawLvl)) ? rawLvl : null;
+    if (lvl !== null) {
+      if (S.lvl0 === null) S.lvl0 = lvl;          // niveau de départ observé
+      S.lvlNow = lvl;                              // niveau actuel
+    }
+    const drop = (S.lvl0 !== null && S.lvlNow !== null) ? (S.lvl0 - S.lvlNow) : 0;
+    if (S.lvl0 !== null && S.lvlNow !== null && drop > 0.5 && S.sessionKm > 0.1 && S.energyAcc > 0.3) {
+      const frac = drop / 100;                      // fraction de batterie consommée
+      S.capWh = S.energyAcc / frac;                 // capacité pack estimée (Wh)
+      const consoWhKm = S.energyAcc / S.sessionKm;  // consommation réelle (Wh/km)
+      // rangeKm = niveau actuel × distance / chute de niveau (l'énergie se simplifie)
+      S.rangeKm = (S.lvlNow * S.sessionKm) / drop;
+      S.rangeSrc = 'level+km';
+    } else if (S.lvl0 !== null && S.lvlNow !== null && drop <= 0.5 && S.sessionKm > 0.1 && S.energyAcc > 0.3) {
+      // niveau stable (pas encore de chute mesurable) : on ne calibre pas, on ne invente pas
+      S.rangeKm = null;
+      S.rangeSrc = 'niveau stable — à confirmer';
+    }
+
     if (T.have72) {
       S.hist.push({ t: Date.now(), v: T.speed });
       const cut = Date.now() - S.lookback * 1000;
@@ -1889,6 +1934,17 @@ if (typeof window !== 'undefined') window.TEV = TEV;
       const el = $('b-lock');
       el.innerHTML = 'Verrouillage <b>non transmis</b>';
       el.classList.remove('ok', 'warn', 'bad');
+    }
+    // signal verrou machine (55 71 t[2]) : byte brut si reçu, état déduit seulement si le firmware le permet
+    const lockEl = $('ka-lock');
+    if (lockEl) {
+      if (T.have71 && T.lockByte !== null && T.lockByte !== undefined) {
+        lockEl.textContent = 'byte ' + T.lockByte + (T.lock ? ' · ' + (T.lock === 'locked' ? 'locké' : 'ouvert') : ' · non interprétable');
+        lockEl.classList.remove('na');
+      } else {
+        lockEl.textContent = 'non transmis';
+        lockEl.classList.add('na');
+      }
     }
     setBadge('b-mode', 'Moteur', T.have72 ? (T.doubleMotor ? '2×' : '1×') : null);
 
@@ -1991,6 +2047,15 @@ if (typeof window !== 'undefined') window.TEV = TEV;
     const kmSession = S.sessionKm || 0;
     const consoB = (kmSession > 0.2 && eWh > 0.05) ? eWh / kmSession : null;
     setMetric('b-conso', consoB, 1, 'Wh/km');
+    /* distance restante : estimation par intégration d'énergie + niveau batterie (immunisée
+       contre le voltage sag). On affiche « – » tant qu'il n'y a pas de chute de niveau mesurable. */
+    const rk = S.rangeKm;
+    setMetric('b-range', rk, 0, 'km',
+      rk === null ? (S.lvl0 !== null ? 'à confirmer — niveau stable' : 'estimée — en cours') : 'estimée · level+km');
+    if (rk !== null && S.capWh) {
+      const cf = $('b-range-foot');
+      if (cf) cf.textContent = 'estimée · ' + Math.round(S.capWh) + ' Wh pack';
+    }
     $('rtag2').textContent = T.have73 ? '55 73' : '–';
 
     $('soc-soh').textContent = T.have52 ? 'SOH ' + T.soh + ' %' : '';

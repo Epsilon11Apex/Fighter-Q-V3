@@ -144,6 +144,32 @@ function f52(q) {
   ok(mbody.indexOf('# FREIN') < mbody.indexOf('# REGEN') || /# FREIN/.test(mbody) && /# REGEN/.test(mbody),
      'les deux marqueurs sont dans le fichier');
 
+  console.log('\n[10] estimation distance restante (immunisée contre le voltage sag)');
+  // Sur cette machine, la tension pack (55 52 t[2..3]) est à 0 : le parseur rejette la trame
+  // avant de remplir T.soc, mais capture le niveau brut t[8] via T.batQuad. L'estimateur doit
+  // lire ce niveau relatif (100 → 91) + l énergie intégrée + la distance pour estimer les km.
+  // reset de l état d estimation : les sections précédentes ont déjà observé un niveau (86).
+  const St = FQ.S; St.lvl0 = null; St.lvlNow = null; St.capWh = null; St.rangeKm = null; St.rangeSrc = '';
+  FQ.feedBytes(f52(100));                       // niveau de départ = 100
+  // roulage avec courant moteur élevé + vitesse, sur plusieurs secondes réelles
+  for (let i = 0; i < 8; i++) {
+    FQ.feedBytes(f72(41, 14, 200));             // ~59,5 km/h, courant arrière 20 A
+    await new Promise((r) => setTimeout(r, 1100));
+  }
+  FQ.feedBytes(f52(91));                        // niveau actuel = 91 → chute de 9 points
+  await new Promise((r) => setTimeout(r, 300));
+  const S = FQ.S;
+  ok(S.lvl0 === 100, 'niveau de départ observé', S.lvl0);
+  ok(S.lvlNow === 91, 'niveau actuel observé', S.lvlNow);
+  ok(S.energyAcc > 0.3, 'énergie intégrée mesurée', S.energyAcc.toFixed(2) + ' Wh');
+  ok(S.sessionKm > 0.1, 'distance session intégrée', S.sessionKm.toFixed(3) + ' km');
+  ok(S.capWh > 0 && S.capWh < 5000, 'capacité pack auto-calibrée', S.capWh ? S.capWh.toFixed(0) + ' Wh' : 'null');
+  ok(typeof S.rangeKm === 'number' && S.rangeKm > 0 && S.rangeKm < 500,
+     'distance restante estimée', S.rangeKm ? S.rangeKm.toFixed(1) + ' km' : 'null');
+  ok(S.rangeSrc === 'level+km', 'source de l estimation', S.rangeSrc);
+  // l estimation doit être immunisée contre le sag : elle dépend de l énergie intégrée
+  // sur la distance, pas du voltage instantané (qui est à 0 sur cette machine).
+
   console.log('\n' + (fail ? fail + ' ÉCHEC(S)' : 'tout est vert'));
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
